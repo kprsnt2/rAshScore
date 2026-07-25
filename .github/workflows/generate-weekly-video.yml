@@ -1,0 +1,64 @@
+name: Weekly AI Video Generator
+
+on:
+  schedule:
+    - cron: '0 6 * * 6'  # 06:00 UTC = 11:30 IST every Saturday (1 hr after weekly report)
+  workflow_dispatch:       # Allow manual trigger
+
+concurrency:
+  group: db-write
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  generate-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install SQLite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: pip install google-genai
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Generate Video
+        env:
+          GCP_PROJECT_ID: rashscore
+          GCP_REGION: us-central1
+        run: |
+          LATEST_TITLE=$(sqlite3 data/brand-intelligence.db "SELECT title FROM reports ORDER BY published_at DESC LIMIT 1;")
+          LATEST_SNIPPET=$(sqlite3 data/brand-intelligence.db "SELECT SUBSTR(content_md, 1, 300) FROM reports ORDER BY published_at DESC LIMIT 1;")
+          echo "Latest title is: $LATEST_TITLE"
+          python scripts/generate-video.py --title "$LATEST_TITLE" --article "$LATEST_SNIPPET"
+          
+          # Move the generated video to the public folder
+          mv latest_report_intro.mp4 public/videos/latest_report_intro.mp4 || echo "Video generation failed or file not found"
+
+      - name: Commit video to repository
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add public/videos/latest_report_intro.mp4
+          git diff --staged --quiet || git commit -m "🎥 Weekly video: $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
+          git push

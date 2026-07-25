@@ -1,0 +1,6 @@
+{
+  "defaultSchema": "brand_intelligence",
+  "defaultDatabase": "rashscore",
+  "defaultLocation": "us-central1",
+  "assertionSchema": "dataform_assertions"
+}

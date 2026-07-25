@@ -1,0 +1,48 @@
+name: "Pipeline: OpenAI (gpt-5.4-mini)"
+
+on:
+  schedule:
+    - cron: '0 1 * * *'  # 01:00 UTC = 06:30 IST daily
+  workflow_dispatch:
+
+concurrency:
+  group: db-write
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Pipeline (OpenAI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NODE_ENV: production
+        run: npx tsx scripts/run-pipeline.ts --provider=openai --models=gpt-5.4-mini,gpt-5.4-nano
+
+      - name: Commit results
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          git diff --staged --quiet || git commit -m "📊 Pipeline [OpenAI]: $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
+          git push

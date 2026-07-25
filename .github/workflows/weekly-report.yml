@@ -1,0 +1,58 @@
+name: Weekly AI Report
+
+on:
+  schedule:
+    - cron: '0 5 * * 6'  # 05:00 UTC = 10:30 IST every Saturday
+  workflow_dispatch:       # Allow manual trigger
+
+concurrency:
+  group: db-write
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Generate Weekly Report
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GCP_PROJECT_ID: rashscore
+          GCP_REGION: us-central1
+          NODE_ENV: production
+        run: npx tsx scripts/generate-weekly-report.ts
+
+      - name: Commit report to DB
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          git diff --staged --quiet || git commit -m "📰 Weekly report: $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
+          git push

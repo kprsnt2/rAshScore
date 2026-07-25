@@ -1,0 +1,31 @@
+config {
+  type: "table",
+  schema: "brand_intelligence",
+  name: "daily_rankings",
+  description: "Daily brand rankings with score/rank deltas — computed from brand_scores_aggregated"
+}
+
+WITH ranked AS (
+  SELECT
+    run_date,
+    industry_id,
+    brand,
+    category,
+    score,
+    recommendation,
+    sentiment,
+    prominence,
+    accuracy,
+    model_count,
+    ROW_NUMBER() OVER (PARTITION BY run_date, industry_id ORDER BY score DESC) AS rank
+  FROM `rashscore.brand_intelligence.brand_scores_aggregated`
+),
+with_deltas AS (
+  SELECT
+    r.*,
+    r.score - LAG(r.score) OVER (PARTITION BY r.industry_id, r.brand ORDER BY r.run_date) AS score_delta,
+    LAG(r.rank) OVER (PARTITION BY r.industry_id, r.brand ORDER BY r.run_date) - r.rank AS rank_delta,
+    LAG(r.run_date) OVER (PARTITION BY r.industry_id, r.brand ORDER BY r.run_date) AS prev_date
+  FROM ranked r
+)
+SELECT * FROM with_deltas

@@ -1,0 +1,60 @@
+name: Daily AI Insights Pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC = 08:30 IST (1.5 hrs after brand pipeline at 01:30 UTC)
+  workflow_dispatch:       # Allow manual trigger
+
+concurrency:
+  group: db-write
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  run-insights:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Pull latest so we get the DB committed by the brand pipeline
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Generate AI Insights
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GCP_PROJECT_ID: rashscore
+          GCP_REGION: us-central1
+          NODE_ENV: production
+        run: npx tsx scripts/run-insights.ts
+
+      - name: Commit insights to DB
+        if: always()   # commit whatever was saved, even on partial failure
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          git diff --staged --quiet || git commit -m "🤖 Daily insights: $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
+          git push

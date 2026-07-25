@@ -1,0 +1,45 @@
+{
+    "name": "rashscore-web",
+    "version": "2.0.0",
+    "description": "rAsh Score — AI Brand Intelligence Dashboard. Hosted on Cloud Run.",
+    "private": true,
+    "author": {
+        "name": "Prashanth Kumar Kadasi",
+        "url": "https://kprsnt.in"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/kprsnt2/rAshScore"
+    },
+    "homepage": "https://rashscore.live",
+    "scripts": {
+        "dev": "next dev",
+        "build": "next build",
+        "start": "next start",
+        "lint": "next lint"
+    },
+    "dependencies": {
+        "@google-cloud/bigquery": "^7.9",
+        "@tailwindcss/typography": "^0.5.20",
+        "framer-motion": "^12.29.2",
+        "next": "^16.1.5",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "react-markdown": "^10.1.0",
+        "remark-gfm": "^4.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^20.14.0",
+        "@types/react": "^18.3.3",
+        "@types/react-dom": "^18.3.0",
+        "autoprefixer": "^10.4.19",
+        "eslint": "^9.39.2",
+        "eslint-config-next": "^16.1.5",
+        "postcss": "^8.4.38",
+        "tailwindcss": "^3.4.4",
+        "typescript": "^5.4.5"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}
