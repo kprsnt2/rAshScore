@@ -1,0 +1,22 @@
+{
+  "name": "rashscore-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for rAsh Score — exposes brand intelligence data as tools for AI assistants",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.9",
+    "@modelcontextprotocol/sdk": "^1.12",
+    "zod": "^3.24"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.4.5"
+  }
+}

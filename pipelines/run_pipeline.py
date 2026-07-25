@@ -26,6 +26,7 @@ from config import PROVIDERS, RETRY_DELAYS, DELAY_BETWEEN_INDUSTRIES
 from industry_data import get_all_industries, get_total_brand_count
 from prompts import generate_batch_prompt, parse_batch_response
 from scoring import fuzzy_match_brand
+from agents.orchestrator import run_agentic_pipeline
 from bq_writer import (
     generate_run_id,
     write_pipeline_run,
@@ -207,6 +208,7 @@ def run_industry(
     provider_cfg: dict,
     run_id: str,
     run_date: str,
+    mode: str = "simple",
 ) -> dict:
     """Run pipeline for a single industry. Returns summary dict."""
     industry_id = industry["id"]
@@ -217,22 +219,34 @@ def run_industry(
     start = time.time()
 
     try:
-        prompt = generate_batch_prompt(brands, category)
-        text, model_used = call_model_with_retry(prompt, provider_name, provider_cfg)
-
-        scores = parse_batch_response(text)
-
-        if not scores:
-            print(f"    ⚠ Unparseable response from {model_used}: {text[:200]}")
-            return {"industry_id": industry_id, "success": 0, "total": len(brands), "error": "unparseable"}
-
-        # Fuzzy-match parsed brand names to expected list
-        matched_scores = []
-        for s in scores:
-            matched = fuzzy_match_brand(s["brand"], brands)
-            if matched:
-                s["brand"] = matched
-                matched_scores.append(s)
+        if mode == "agentic":
+            print("  🤖 Running in AGENTIC mode...")
+            agent_result = run_agentic_pipeline(industry, provider_name, provider_cfg, call_model_with_retry)
+            matched_scores = agent_result["scores"]
+            model_used = agent_result["model_used"]
+            
+            if not matched_scores:
+                print(f"    ⚠ Agentic pipeline failed to produce scores")
+                return {"industry_id": industry_id, "success": 0, "total": len(brands), "error": "unparseable"}
+                
+        else:
+            # Simple Mode
+            prompt = generate_batch_prompt(brands, category)
+            text, model_used = call_model_with_retry(prompt, provider_name, provider_cfg)
+    
+            scores = parse_batch_response(text)
+    
+            if not scores:
+                print(f"    ⚠ Unparseable response from {model_used}: {text[:200]}")
+                return {"industry_id": industry_id, "success": 0, "total": len(brands), "error": "unparseable"}
+    
+            # Fuzzy-match parsed brand names to expected list
+            matched_scores = []
+            for s in scores:
+                matched = fuzzy_match_brand(s["brand"], brands)
+                if matched:
+                    s["brand"] = matched
+                    matched_scores.append(s)
 
         elapsed_ms = int((time.time() - start) * 1000)
 
@@ -251,7 +265,7 @@ def run_industry(
         return {"industry_id": industry_id, "success": 0, "total": len(brands), "error": str(e)}
 
 
-def run_pipeline(provider_name: str) -> None:
+def run_pipeline(provider_name: str, mode: str = "simple") -> None:
     """Run the full pipeline for a single provider."""
     if provider_name not in PROVIDERS:
         print(f"❌ Unknown provider: {provider_name}")
@@ -277,7 +291,7 @@ def run_pipeline(provider_name: str) -> None:
     all_scores = []
 
     for i, industry in enumerate(industries):
-        result = run_industry(industry, provider_name, provider_cfg, run_id, run_date)
+        result = run_industry(industry, provider_name, provider_cfg, run_id, run_date, mode)
         results.append(result)
         if result.get("scores"):
             all_scores.extend(result["scores"])
@@ -346,6 +360,12 @@ def main():
         choices=["openai", "gemini", "claude", "grok", "all"],
         help="AI provider to use",
     )
+    parser.add_argument(
+        "--mode",
+        default="simple",
+        choices=["simple", "agentic"],
+        help="Run mode: 'simple' (one prompt) or 'agentic' (multi-agent workflow)",
+    )
     args = parser.parse_args()
 
     if args.provider == "all":
@@ -354,12 +374,12 @@ def main():
             print(f"  Running provider: {p}")
             print(f"{'='*60}\n")
             try:
-                run_pipeline(p)
+                run_pipeline(p, args.mode)
             except Exception as e:
                 print(f"❌ Provider {p} failed entirely: {e}")
             time.sleep(30)  # pause between providers
     else:
-        run_pipeline(args.provider)
+        run_pipeline(args.provider, args.mode)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import "./globals.css";
 import { ToastProvider } from "@/components/Toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import NavHeader from "@/components/NavHeader";
+import ChatAssistant from "@/components/ChatAssistant";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -131,6 +132,8 @@ export default function RootLayout({
                             <main id="main-content" className="flex-grow" role="main">
                                 {children}
                             </main>
+
+                            <ChatAssistant />
 
                             {/* Footer */}
                             <footer className="border-t py-10 text-center text-sm" style={{ borderColor: 'var(--rs-border)', color: 'var(--rs-text-muted)' }}>
