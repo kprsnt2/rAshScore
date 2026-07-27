@@ -219,9 +219,12 @@ def run_industry(
     start = time.time()
 
     try:
-        if mode == "agentic":
-            print("  🤖 Running in AGENTIC mode...")
-            agent_result = run_agentic_pipeline(industry, provider_name, provider_cfg, call_model_with_retry)
+        if mode in ("agentic", "agentic-live"):
+            is_live = mode == "agentic-live"
+            agent_result = run_agentic_pipeline(
+                industry, provider_name, provider_cfg,
+                call_model_with_retry, live=is_live,
+            )
             matched_scores = agent_result["scores"]
             model_used = agent_result["model_used"]
             
@@ -363,8 +366,8 @@ def main():
     parser.add_argument(
         "--mode",
         default="simple",
-        choices=["simple", "agentic"],
-        help="Run mode: 'simple' (one prompt) or 'agentic' (multi-agent workflow)",
+        choices=["simple", "agentic", "agentic-live"],
+        help="Run mode: 'simple' (one prompt), 'agentic' (LLM research + scoring), 'agentic-live' (Tavily + LLM)",
     )
     args = parser.parse_args()
 

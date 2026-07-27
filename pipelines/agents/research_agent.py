@@ -1,19 +1,21 @@
 """
 Research Agent — Pre-scoring intelligence gathering
 
-Uses an LLM call to gather real-time brand context before scoring.
-This replaces the mock implementation with actual AI-powered research
-that leverages the model's training data and knowledge cutoff.
+Two modes:
+  1. LLM-only research (--mode=agentic): Asks the AI model to research brands
+  2. Live research (--mode=agentic-live): Uses Tavily AI Search for real web data,
+     then enriches with LLM synthesis
 
-The research output is injected into the scoring prompt so the Scoring Agent
-has fresh context to work with (controversies, launches, sentiment shifts).
+For Tavily mode, we do 1 search per INDUSTRY (not per brand) to stay within
+the free tier (18 industries × 30 days = 540 searches/month < 1000 free limit).
 """
 
 from __future__ import annotations
+import json
 
 
 def build_research_prompt(brands: list[str], category: str) -> str:
-    """Build the research prompt for an industry's brands."""
+    """Build the LLM-only research prompt for an industry's brands."""
     brand_list = "\n".join(f"- {b}" for b in brands)
 
     return f"""You are a brand intelligence researcher. For each brand below in the Indian {category} industry,
@@ -43,10 +45,72 @@ Be factual. If you don't have recent data on a brand, say so honestly.
 Respond ONLY with the JSON, no markdown fences, no explanation."""
 
 
+def build_tavily_enriched_prompt(
+    brands: list[str],
+    category: str,
+    tavily_results: dict,
+) -> str:
+    """
+    Build a research prompt enriched with real Tavily search data.
+    The LLM synthesizes Tavily's raw results into per-brand context.
+    """
+    brand_list = "\n".join(f"- {b}" for b in brands)
+
+    return f"""You are a brand intelligence researcher. We have already searched the web for recent information about the {category} industry in India.
+
+## Web Search Results (verified, real-time):
+Summary: {tavily_results.get('answer', 'No summary available.')}
+
+Sources:
+{chr(10).join(f'- {url}' for url in tavily_results.get('sources', [])[:5])}
+
+Key excerpts:
+{chr(10).join(f'- {s}' for s in tavily_results.get('snippets', [])[:5])}
+
+## Your Task
+Using BOTH the search results above AND your own knowledge, provide a research summary for each brand:
+
+Brands:
+{brand_list}
+
+Respond with valid JSON only:
+{{
+  "research": [
+    {{
+      "brand": "Brand Name",
+      "recent_news": "Summary using search results + your knowledge",
+      "sentiment": "positive|neutral|negative|mixed",
+      "market_trend": "growing|stable|declining",
+      "key_issues": "Any controversies or notable events, or 'none'"
+    }}
+  ]
+}}
+
+Be factual. Cite specific findings from the search results where possible.
+Respond ONLY with the JSON, no markdown fences, no explanation."""
+
+
+def run_tavily_search(brands: list[str], category: str) -> dict:
+    """
+    Run a single Tavily search for the entire industry (1 API call).
+    Returns raw Tavily results dict.
+    """
+    from .tools.tavily_search import search_brand, is_available
+
+    if not is_available():
+        return {"answer": "", "sources": [], "snippets": [], "sentiment_hints": "neutral"}
+
+    # Single search for the whole industry — saves API calls
+    top_brands = ", ".join(brands[:5])
+    result = search_brand(
+        brand=f"{category} industry top brands {top_brands}",
+        category=category,
+    )
+    return result
+
+
 def parse_research_response(text: str, brands: list[str]) -> list[dict]:
     """Parse the research JSON. Falls back to empty context on failure."""
-    import json
-
     try:
         clean = text.strip()
         if clean.startswith("```json"):
