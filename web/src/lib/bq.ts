@@ -360,3 +360,61 @@ export async function healthCheck(): Promise<{ ok: boolean; latency: number }> {
     return { ok: false, latency: Date.now() - start };
   }
 }
+
+/** Get a specific brand's score for the chat assistant */
+export async function getBrandScore(brand: string, date: string): Promise<BrandScore | null> {
+  const [rows] = await bq.query({
+    query: `
+      SELECT brand, score, recommendation, sentiment, prominence, accuracy,
+             category, model, industry_id,
+             ROW_NUMBER() OVER (PARTITION BY industry_id ORDER BY score DESC) as rank
+      FROM \`${FQ}.brand_scores_aggregated\`
+      WHERE run_date = @date
+        AND LOWER(brand) = LOWER(@brand)
+      LIMIT 1
+    `,
+    params: { date, brand },
+  });
+
+  if (!rows.length) return null;
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    brand: r.brand as string,
+    score: r.score as number,
+    recommendation: r.recommendation as number,
+    sentiment: r.sentiment as number,
+    prominence: r.prominence as number,
+    accuracy: r.accuracy as number,
+    category: (r.category as string) || '',
+    model: 'all',
+    rank: r.rank as number,
+  };
+}
+
+/** Get top ranked brands for an industry for the chat assistant */
+export async function getIndustryRankings(industryId: string, date: string, limit: number = 5): Promise<BrandScore[]> {
+  const [rows] = await bq.query({
+    query: `
+      SELECT brand, score, recommendation, sentiment, prominence, accuracy,
+             category, model, industry_id,
+             ROW_NUMBER() OVER (ORDER BY score DESC) as rank
+      FROM \`${FQ}.brand_scores_aggregated\`
+      WHERE run_date = @date AND industry_id = @industryId
+      ORDER BY score DESC
+      LIMIT @limit
+    `,
+    params: { date, industryId, limit },
+  });
+
+  return rows.map((r: Record<string, unknown>) => ({
+    brand: r.brand as string,
+    score: r.score as number,
+    recommendation: r.recommendation as number,
+    sentiment: r.sentiment as number,
+    prominence: r.prominence as number,
+    accuracy: r.accuracy as number,
+    category: (r.category as string) || '',
+    model: 'all',
+    rank: r.rank as number,
+  }));
+}
