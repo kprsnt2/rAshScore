@@ -45,7 +45,7 @@ export async function POST(req: Request) {
           parameters: z.object({
             brand: z.string().describe("The name of the brand (e.g., 'Flipkart')")
           }),
-          execute: async ({ brand }) => {
+          execute: async ({ brand }): Promise<any> => {
             const date = await bq.getLatestRunDate();
             if (!date) return { error: "No data available." };
             return await bq.getBrandScore(brand, date) || { error: `Brand '${brand}' not found.` };
@@ -57,7 +57,7 @@ export async function POST(req: Request) {
             industry: z.string().describe("The ID of the industry (e.g., 'technology', 'ecommerce')"),
             limit: z.number().optional().describe("Number of top brands to return (default: 5)")
           }),
-          execute: async ({ industry, limit }) => {
+          execute: async ({ industry, limit }): Promise<any> => {
             const date = await bq.getLatestRunDate();
             if (!date) return { error: "No data available." };
             return await bq.getIndustryRankings(industry, date, limit || 5);
@@ -68,7 +68,7 @@ export async function POST(req: Request) {
           parameters: z.object({
             industry: z.string().describe("The ID of the industry (e.g., 'ecommerce')")
           }),
-          execute: async ({ industry }) => {
+          execute: async ({ industry }): Promise<any> => {
             return await bq.getLatestInsight(industry) || { error: `No insights found for industry '${industry}'.` };
           }
         }),
@@ -77,7 +77,7 @@ export async function POST(req: Request) {
           parameters: z.object({
             query: z.string().describe("The search term")
           }),
-          execute: async ({ query }) => {
+          execute: async ({ query }): Promise<any> => {
             const date = await bq.getLatestRunDate();
             if (!date) return { error: "No data available." };
             return await bq.searchBrands(query, date);
