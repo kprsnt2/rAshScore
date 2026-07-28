@@ -2,54 +2,67 @@
 # # 🧠 rAsh Score — Daily Scoring Pipeline
 # **Self-contained BigQuery Notebook** — scores 270 brands across 18 industries using Gemini AI.
 #
-# **Schedule:** Daily at 6:00 AM IST via BigQuery Studio → Notebook Scheduling
+# Uses the official `google-genai` SDK (handles retries + rate limits automatically).
 #
-# No local setup needed. All code is inline. Auth is automatic in BigQuery notebooks.
+# **Schedule:** Daily at 6:00 AM IST via BigQuery Studio → Notebook Scheduling
 
 # %% [markdown]
-# ## Cell 1: Install Dependencies & Configure
+# ## Cell 1: Install & Configure
 
 # %%
-# Install required packages (runs once per notebook session)
 import subprocess, sys
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "requests", "google-cloud-bigquery", "google-auth"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "google-genai", "google-cloud-bigquery"])
 print("✅ Dependencies installed")
 
 # %%
-# ─── CONFIGURATION ───────────────────────────────────────────────────────────
 import os
 
 GCP_PROJECT_ID = "rashscore"
 BQ_DATASET = "brand_intelligence"
 BQ_FULL = f"{GCP_PROJECT_ID}.{BQ_DATASET}"
 
-# ⚠️ SET YOUR API KEY HERE (or use Secret Manager)
-# Option 1: Hardcode (for testing only)
+# ⚠️ SET YOUR API KEY — pick ONE method:
+
+# Method 1: Direct (for testing)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 
-# Option 2: Load from Secret Manager (recommended for scheduled runs)
+# Method 2: Secret Manager (recommended for scheduled runs)
 # from google.cloud import secretmanager
-# client = secretmanager.SecretManagerServiceClient()
-# name = f"projects/{GCP_PROJECT_ID}/secrets/gemini-api-key/versions/latest"
-# GEMINI_API_KEY = client.access_secret_version(name=name).payload.data.decode("utf-8")
+# sm = secretmanager.SecretManagerServiceClient()
+# GEMINI_API_KEY = sm.access_secret_version(
+#     name=f"projects/{GCP_PROJECT_ID}/secrets/gemini-api-key/versions/latest"
+# ).payload.data.decode("utf-8")
 
 PROVIDER = "gemini"
 PRIMARY_MODEL = "gemini-2.5-flash"
 BACKUP_MODEL = "gemini-2.5-flash-lite"
-TEMPERATURE = 0.3
-MAX_TOKENS = 8000
-TIMEOUT = 60
-RETRY_DELAYS = [30, 60, 90]
-DELAY_BETWEEN_INDUSTRIES = 12  # seconds
 
 SCORE_BOUNDS = {"recommendation": (0, 40), "sentiment": (0, 30), "prominence": (0, 20), "accuracy": (0, 10)}
 WEIGHTS = {"recommendation": 0.40, "sentiment": 0.30, "prominence": 0.20, "accuracy": 0.10}
+DELAY_BETWEEN_INDUSTRIES = 5  # seconds (SDK handles rate limits, so we can reduce this)
 
 print(f"✅ Config: {GCP_PROJECT_ID} / {PRIMARY_MODEL}")
-print(f"   API Key: {'SET' if GEMINI_API_KEY != 'YOUR_GEMINI_API_KEY_HERE' else '⚠️ NOT SET — edit cell above!'}")
+print(f"   API Key: {'SET' if GEMINI_API_KEY != 'YOUR_GEMINI_API_KEY_HERE' else '⚠️ NOT SET'}")
 
 # %% [markdown]
-# ## Cell 2: Industry & Brand Data (18 industries, 270 brands)
+# ## Cell 2: Initialize Gemini Client (google-genai SDK)
+
+# %%
+from google import genai
+from google.genai import types
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Quick test
+test = client.models.generate_content(
+    model=PRIMARY_MODEL,
+    contents="Say 'rAsh Score ready' in exactly 3 words.",
+    config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=20),
+)
+print(f"✅ Gemini connected: {test.text.strip()}")
+
+# %% [markdown]
+# ## Cell 3: Industry & Brand Data
 
 # %%
 INDUSTRIES = [
@@ -92,17 +105,15 @@ INDUSTRIES = [
 ]
 
 total_brands = sum(len(i["top_brands"]) for i in INDUSTRIES)
-print(f"✅ Loaded {len(INDUSTRIES)} industries, {total_brands} brands")
+print(f"✅ {len(INDUSTRIES)} industries, {total_brands} brands")
 
 # %% [markdown]
-# ## Cell 3: Scoring Logic (Prompts, Parsing, Weightage)
+# ## Cell 4: Scoring Logic
 
 # %%
-import json, re, time, uuid, requests
+import json, time, uuid
 from datetime import date, datetime
 from google.cloud import bigquery
-
-# ─── Scoring Guidelines ─────────────────────────────────────────────────────
 
 SCORING_GUIDELINES = """STRICT Scoring guidelines — ALL scores are 0 to 100. Be honest and critical:
 
@@ -121,65 +132,47 @@ SCORING_GUIDELINES = """STRICT Scoring guidelines — ALL scores are 0 to 100. B
 IMPORTANT: Most brands should score 40-70. Only truly exceptional global brands score 80+.
 A score of 90+ should be EXTREMELY rare. NEVER give a perfect 100."""
 
-SOCIAL_MEDIA_RESEARCH = """Research the brand's recent presence on Reddit, X/Twitter, news articles.
-Factor in controversies, product launches, viral content, community sentiment.
-This MUST influence your scores — especially sentiment and recommendation."""
 
-
-def generate_batch_prompt(brands, category):
+def generate_prompt(brands, category):
     brand_list = "\n".join(f"{i+1}. {b}" for i, b in enumerate(brands))
-    return f"""You are an expert brand intelligence analyst. Score these {len(brands)} brands in the Indian {category} industry for AI visibility.
+    return f"""You are an expert brand intelligence analyst. Score these {len(brands)} brands in the Indian {category} industry.
 
-{SOCIAL_MEDIA_RESEARCH}
+Research each brand's recent social media presence on Reddit, X/Twitter, and news.
+Factor in controversies, product launches, viral content, community sentiment.
 
 Brands:
 {brand_list}
 
-Score EACH dimension on a scale of 0 to 100.
-
-Respond ONLY with valid JSON (no markdown, no explanation):
+Score EACH dimension 0-100. Respond ONLY with valid JSON:
 {{
   "brands": [
-    {{
-      "brand": "Brand Name",
-      "breakdown": {{
-        "recommendation": <number 0-100>,
-        "sentiment": <number 0-100>,
-        "prominence": <number 0-100>,
-        "accuracy": <number 0-100>
-      }}
-    }}
+    {{"brand": "Brand Name", "breakdown": {{"recommendation": <0-100>, "sentiment": <0-100>, "prominence": <0-100>, "accuracy": <0-100>}}}}
   ]
 }}
 
 {SCORING_GUIDELINES}
 
-Score ALL {len(brands)} brands. Be brutally honest — most dimensions should be 40-70."""
+Score ALL {len(brands)} brands. Be brutally honest."""
 
 
-def apply_weightage(raw_scores):
-    return {dim: int(round(max(0, min(100, float(raw_scores.get(dim, 0)))) * w))
-            for dim, w in WEIGHTS.items()}
+def apply_weightage(raw):
+    return {d: int(round(max(0, min(100, float(raw.get(d, 0)))) * w)) for d, w in WEIGHTS.items()}
 
 
-def fuzzy_match_brand(parsed_name, expected_brands):
-    p = parsed_name.strip().lower()
-    if not p:
-        return None
-    for b in expected_brands:
-        if b.lower() == p:
-            return b
-    for b in expected_brands:
-        if b.lower() in p or p in b.lower():
-            return b
+def fuzzy_match(parsed, expected):
+    p = parsed.strip().lower()
+    if not p: return None
+    for b in expected:
+        if b.lower() == p: return b
+    for b in expected:
+        if b.lower() in p or p in b.lower(): return b
     pf = p.split()[0] if p else ""
-    for b in expected_brands:
-        if b.lower().split()[0] == pf:
-            return b
+    for b in expected:
+        if b.lower().split()[0] == pf: return b
     return None
 
 
-def parse_batch_response(text):
+def parse_response(text):
     try:
         s = text.strip()
         if s.startswith("```json"): s = s[7:]
@@ -187,8 +180,7 @@ def parse_batch_response(text):
         if s.endswith("```"): s = s[:-3]
         parsed = json.loads(s.strip())
         brands_list = parsed.get("brands", parsed)
-        if not isinstance(brands_list, list):
-            return []
+        if not isinstance(brands_list, list): return []
         results = []
         for b in brands_list:
             name = str(b.get("brand") or b.get("name") or "").strip()
@@ -197,9 +189,9 @@ def parse_batch_response(text):
             raw = {d: float(bd.get(d, 0)) for d in WEIGHTS}
             weighted = apply_weightage(raw)
             total = min(100, sum(weighted.values()))
-            results.append({"brand": name, "score": total, "breakdown": weighted, "raw_scores": raw})
+            results.append({"brand": name, "score": total, "breakdown": weighted})
         return results
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
+    except Exception as e:
         print(f"  ⚠ Parse error: {e}")
         return []
 
@@ -207,91 +199,83 @@ def parse_batch_response(text):
 print("✅ Scoring logic loaded")
 
 # %% [markdown]
-# ## Cell 4: Gemini API Caller with Retry
+# ## Cell 5: Gemini Caller (with automatic retry via SDK)
 
 # %%
 def call_gemini(prompt, model=PRIMARY_MODEL):
-    """Call Gemini API. Returns (response_text, model_used)."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-    resp = requests.post(url, headers={"Content-Type": "application/json"}, json={
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": TEMPERATURE, "maxOutputTokens": MAX_TOKENS},
-    }, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
-    return text, model
+    """Call Gemini using google-genai SDK. Handles retries automatically."""
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=8000,
+            ),
+        )
+        text = response.text
+        if not text or not text.strip():
+            raise ValueError("Empty response from model")
+        return text, model
+    except Exception as e:
+        raise RuntimeError(f"{model}: {e}")
 
 
 def call_with_retry(prompt):
-    """Call Gemini with primary → backup fallback and retries."""
+    """Try primary model, then backup. SDK handles 429 retries internally."""
     for model in [PRIMARY_MODEL, BACKUP_MODEL]:
-        for attempt in range(len(RETRY_DELAYS) + 1):
-            try:
-                text, used = call_gemini(prompt, model)
-                if not text.strip():
-                    raise ValueError("Empty response")
-                return text, used
-            except Exception as e:
-                is_quota = any(k in str(e).lower() for k in ["429", "quota", "rate"])
-                print(f"    ⚠ {model} attempt {attempt+1} failed{' (rate-limit)' if is_quota else ''}: {str(e)[:100]}")
-                if attempt < len(RETRY_DELAYS):
-                    time.sleep(RETRY_DELAYS[attempt])
-        print(f"    ❌ {model} exhausted retries, trying backup...")
+        try:
+            return call_gemini(prompt, model)
+        except Exception as e:
+            print(f"    ⚠ {model} failed: {str(e)[:120]}")
+            if model == PRIMARY_MODEL:
+                print(f"    🔄 Trying backup model: {BACKUP_MODEL}...")
+                time.sleep(5)
     raise RuntimeError("All models failed")
 
 
-print("✅ Gemini caller ready")
+print("✅ Gemini caller ready (using google-genai SDK with auto-retry)")
 
 # %% [markdown]
-# ## Cell 5: BigQuery Writer
+# ## Cell 6: BigQuery Writer
 
 # %%
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)
 
-def write_brand_scores(scores, run_id, run_date, model, industry_id, category):
-    rows = []
-    for s in scores:
-        bd = s.get("breakdown", {})
-        rows.append({
-            "run_id": run_id, "run_date": run_date, "industry_id": industry_id,
-            "brand": s["brand"], "category": category, "model": model,
-            "score": s["score"],
-            "recommendation": bd.get("recommendation", 0),
-            "sentiment": bd.get("sentiment", 0),
-            "prominence": bd.get("prominence", 0),
-            "accuracy": bd.get("accuracy", 0),
-            "response_time_ms": s.get("response_time_ms", 0),
-            "error": s.get("error"),
-            "created_at": datetime.utcnow().isoformat(),
-        })
+
+def write_scores(scores, run_id, run_date, model, industry_id, category):
+    rows = [{
+        "run_id": run_id, "run_date": run_date, "industry_id": industry_id,
+        "brand": s["brand"], "category": category, "model": model,
+        "score": s["score"],
+        "recommendation": s["breakdown"].get("recommendation", 0),
+        "sentiment": s["breakdown"].get("sentiment", 0),
+        "prominence": s["breakdown"].get("prominence", 0),
+        "accuracy": s["breakdown"].get("accuracy", 0),
+        "response_time_ms": 0, "error": None,
+        "created_at": datetime.utcnow().isoformat(),
+    } for s in scores]
     if not rows: return 0
     errors = bq_client.insert_rows_json(f"{BQ_FULL}.brand_scores", rows)
-    if errors:
-        print(f"  ❌ BQ insert error: {errors}")
-        raise RuntimeError(f"BQ write failed: {errors}")
+    if errors: raise RuntimeError(f"BQ error: {errors}")
     return len(rows)
 
 
-def write_pipeline_run(run_id, run_date, provider, model, total_industries,
-                        total_brands, successful_brands, average_score,
-                        execution_time_ms, status="success"):
-    rows = [{
-        "run_id": run_id, "run_date": run_date, "provider": provider,
+def write_run(run_id, run_date, model, total_industries, total_brands,
+              successful, avg_score, time_ms, status):
+    bq_client.insert_rows_json(f"{BQ_FULL}.pipeline_runs", [{
+        "run_id": run_id, "run_date": run_date, "provider": PROVIDER,
         "model": model, "total_industries": total_industries,
-        "total_brands": total_brands, "successful_brands": successful_brands,
-        "average_score": average_score, "execution_time_ms": execution_time_ms,
+        "total_brands": total_brands, "successful_brands": successful,
+        "average_score": avg_score, "execution_time_ms": time_ms,
         "status": status, "created_at": datetime.utcnow().isoformat(),
-    }]
-    errors = bq_client.insert_rows_json(f"{BQ_FULL}.pipeline_runs", rows)
-    if errors:
-        print(f"  ❌ Pipeline run write error: {errors}")
+    }])
 
 
 print("✅ BigQuery writer ready")
 
 # %% [markdown]
-# ## Cell 6: 🚀 Run the Pipeline
+# ## Cell 7: 🚀 Run Pipeline
 
 # %%
 run_id = str(uuid.uuid4())
@@ -301,105 +285,93 @@ start_time = time.time()
 print(f"🇮🇳 rAsh Score Pipeline")
 print("=" * 50)
 print(f"📊 {len(INDUSTRIES)} industries, {total_brands} brands")
-print(f"🎯 Model: {PRIMARY_MODEL} (backup: {BACKUP_MODEL})")
-print(f"📅 Date: {run_date}")
-print(f"🔑 Run ID: {run_id[:8]}...")
-print(f"\n🚀 Starting...\n")
+print(f"🎯 Model: {PRIMARY_MODEL} (google-genai SDK)")
+print(f"📅 Date: {run_date} | Run: {run_id[:8]}...")
+print()
 
 results = []
 all_scores = []
 
 for i, industry in enumerate(INDUSTRIES):
-    industry_id = industry["id"]
+    ind_id = industry["id"]
     brands = industry["top_brands"]
-    category = industry["category"]
+    cat = industry["category"]
 
-    print(f"  📋 {industry['name']} ({len(brands)} brands)...")
-    ind_start = time.time()
+    print(f"  📋 {industry['name']} ({len(brands)} brands)...", end=" ")
+    t0 = time.time()
 
     try:
-        prompt = generate_batch_prompt(brands, category)
+        prompt = generate_prompt(brands, cat)
         text, model_used = call_with_retry(prompt)
-        scores = parse_batch_response(text)
+        scores = parse_response(text)
 
         if not scores:
-            print(f"    ⚠ Unparseable response")
-            results.append({"industry_id": industry_id, "success": 0, "total": len(brands), "error": "unparseable"})
+            print("⚠ Parse failed")
+            results.append({"id": ind_id, "ok": 0, "total": len(brands), "err": "parse"})
             continue
 
-        # Fuzzy match brand names
         matched = []
         for s in scores:
-            m = fuzzy_match_brand(s["brand"], brands)
+            m = fuzzy_match(s["brand"], brands)
             if m:
                 s["brand"] = m
                 matched.append(s)
 
-        # Write to BigQuery
-        written = write_brand_scores(matched, run_id, run_date, model_used, industry_id, category)
-        elapsed = time.time() - ind_start
+        written = write_scores(matched, run_id, run_date, model_used, ind_id, cat)
+        elapsed = time.time() - t0
 
-        print(f"  ✅ {industry['name']}: {written}/{len(brands)} brands in {elapsed:.1f}s")
-        results.append({"industry_id": industry_id, "success": written, "total": len(brands), "scores": matched})
+        print(f"✅ {written}/{len(brands)} in {elapsed:.1f}s")
+        results.append({"id": ind_id, "ok": written, "total": len(brands), "scores": matched})
         all_scores.extend(matched)
 
     except Exception as e:
-        print(f"  ❌ {industry['name']} failed: {e}")
-        results.append({"industry_id": industry_id, "success": 0, "total": len(brands), "error": str(e)})
+        print(f"❌ {e}")
+        results.append({"id": ind_id, "ok": 0, "total": len(brands), "err": str(e)})
 
-    # Rate limit delay
     if i < len(INDUSTRIES) - 1:
         time.sleep(DELAY_BETWEEN_INDUSTRIES)
 
 # %% [markdown]
-# ## Cell 7: Summary & Write Pipeline Run
+# ## Cell 8: Summary
 
 # %%
-total_time_ms = int((time.time() - start_time) * 1000)
-successful = sum(r["success"] for r in results)
-failed = [r for r in results if r.get("error")]
-avg_score = round(sum(s["score"] for s in all_scores) / len(all_scores)) if all_scores else 0
+total_ms = int((time.time() - start_time) * 1000)
+successful = sum(r["ok"] for r in results)
+failed = [r for r in results if r.get("err")]
+avg = round(sum(s["score"] for s in all_scores) / len(all_scores)) if all_scores else 0
 
-# Write pipeline run summary
 if successful > 0:
-    write_pipeline_run(
-        run_id=run_id, run_date=run_date, provider=PROVIDER, model=PRIMARY_MODEL,
-        total_industries=len(INDUSTRIES), total_brands=total_brands,
-        successful_brands=successful, average_score=avg_score,
-        execution_time_ms=total_time_ms,
-        status="partial" if failed else "success",
-    )
-    print(f"💾 Pipeline run recorded")
+    write_run(run_id, run_date, PRIMARY_MODEL, len(INDUSTRIES), total_brands,
+              successful, avg, total_ms, "partial" if failed else "success")
 
-print(f"\n📊 Pipeline Summary")
-print("=" * 30)
+print(f"\n📊 Summary")
+print(f"{'=' * 30}")
 print(f"Industries: {len(INDUSTRIES) - len(failed)}/{len(INDUSTRIES)}")
 print(f"Brands:     {successful}/{total_brands}")
-print(f"Avg Score:  {avg_score}/100")
-print(f"Time:       {total_time_ms / 1000:.0f}s")
+print(f"Avg Score:  {avg}/100")
+print(f"Time:       {total_ms / 1000:.0f}s")
 
 if failed:
-    print(f"\n⚠️ Failed: {', '.join(r['industry_id'] for r in failed)}")
+    print(f"\n⚠️ Failed: {', '.join(r['id'] for r in failed)}")
 
 if all_scores:
     top = sorted(all_scores, key=lambda s: s["score"], reverse=True)[:10]
-    print(f"\n🏆 Top 10 Brands:")
+    print(f"\n🏆 Top 10:")
     for i, s in enumerate(top):
         print(f"  {i+1}. {s['brand']} — {s['score']}/100")
 
 print("\n✅ Pipeline complete!")
 
 # %% [markdown]
-# ## Cell 8: Quick Verification Query
+# ## Cell 9: Verify in BigQuery
 
 # %%
-verify_df = bq_client.query(f"""
+df = bq_client.query(f"""
     SELECT brand, score, recommendation, sentiment, prominence, accuracy, industry_id
     FROM `{BQ_FULL}.brand_scores`
     WHERE run_date = '{run_date}' AND run_id = '{run_id}'
-    ORDER BY score DESC
-    LIMIT 20
+    ORDER BY score DESC LIMIT 20
 """).to_dataframe()
 
-print(f"📊 Top 20 brands scored today ({run_date}):")
-verify_df
+print(f"📊 Top 20 brands scored today:")
+df

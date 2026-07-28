@@ -2,18 +2,25 @@
 # # 💡 rAsh Score — Daily Insight Generation
 # Generates AI-powered narrative insights for each industry using latest scores.
 #
-# **Schedule:** Daily at 7:00 AM IST (1 hour after scoring pipeline)
+# Uses `google-genai` SDK. **Schedule:** Daily at 7:00 AM IST (1 hour after scoring)
 
 # %%
-import subprocess, sys, os, json, time, uuid, requests
+import subprocess, sys, os, json, time, uuid
 from datetime import date, datetime
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "requests", "google-cloud-bigquery"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "google-genai", "google-cloud-bigquery"])
 
 # %%
+from google import genai
+from google.genai import types
+from google.cloud import bigquery
+
 GCP_PROJECT_ID = "rashscore"
 BQ_FULL = f"{GCP_PROJECT_ID}.brand_intelligence"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 MODEL = "gemini-2.5-flash"
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+ai = genai.Client(api_key=GEMINI_API_KEY)
+bq = bigquery.Client(project=GCP_PROJECT_ID)
 
 INDUSTRIES = [
     "technology", "automotive", "ecommerce", "fashion", "food-beverage",
@@ -21,10 +28,7 @@ INDUSTRIES = [
     "energy", "fmcg", "realestate", "edtech", "logistics",
     "consumer-electronics", "mobile-phones", "home-appliances",
 ]
-
-from google.cloud import bigquery
-bq = bigquery.Client(project=GCP_PROJECT_ID)
-print(f"✅ Config ready — {len(INDUSTRIES)} industries")
+print(f"✅ Ready — {len(INDUSTRIES)} industries")
 
 # %% [markdown]
 # ## Generate Insights
@@ -32,7 +36,7 @@ print(f"✅ Config ready — {len(INDUSTRIES)} industries")
 # %%
 def get_latest_scores(industry_id):
     rows = list(bq.query(f"""
-        SELECT brand, score, recommendation, sentiment, prominence, accuracy, run_date
+        SELECT brand, score, run_date
         FROM `{BQ_FULL}.brand_scores_aggregated`
         WHERE industry_id = '{industry_id}'
           AND run_date = (SELECT MAX(run_date) FROM `{BQ_FULL}.brand_scores_aggregated` WHERE industry_id = '{industry_id}')
@@ -54,14 +58,13 @@ def get_previous_insight(industry_id):
     return {"text": rows[0].insight_text, "date": str(rows[0].insight_date)} if rows else None
 
 
-def call_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_API_KEY}"
-    resp = requests.post(url, json={
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 2000},
-    }, timeout=60)
-    resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+def call_ai(prompt):
+    response = ai.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.5, max_output_tokens=2000),
+    )
+    return response.text
 
 
 def write_insight(industry_id, insight_date, text):
@@ -74,21 +77,20 @@ def write_insight(industry_id, insight_date, text):
         "created_at": datetime.utcnow().isoformat(),
     }])
 
-
 # %%
 today = date.today().isoformat()
 success = 0
 
 for ind_id in INDUSTRIES:
-    print(f"\n📋 {ind_id}...")
+    print(f"📋 {ind_id}...", end=" ")
 
     scores = get_latest_scores(ind_id)
     if not scores:
-        print(f"  ⚠ No scores found, skipping")
+        print("⚠ No scores")
         continue
 
     prev = get_previous_insight(ind_id)
-    top_brands = "\n".join(f"  {b['rank']}. {b['brand']}: {b['score']}/100" for b in scores["brands"][:10])
+    top = "\n".join(f"  {b['rank']}. {b['brand']}: {b['score']}/100" for b in scores["brands"][:10])
 
     if prev:
         prompt = f"""You are an AI brand intelligence analyst covering India.
@@ -97,28 +99,26 @@ Yesterday's insight ({prev['date']}) for {ind_id}:
 {prev['text']}
 
 Today's data ({scores['run_date']}) — avg: {scores['avg_score']}:
-{top_brands}
+{top}
 
-Generate 4-5 updated bullet-point insights. Each bullet starts with an emoji.
-Focus on changes, movers, and trends. Be specific with names and scores.
-Output ONLY the bullet list."""
+Generate 4-5 updated bullet-point insights. Each starts with emoji.
+Focus on changes, movers, trends. Be specific. Output ONLY bullets."""
     else:
         prompt = f"""You are an AI brand intelligence analyst covering India.
 
 Data for {ind_id} ({scores['run_date']}) — avg: {scores['avg_score']}:
-{top_brands}
+{top}
 
-Generate 4-5 bullet-point insights. Each bullet starts with an emoji.
-Be specific with names, scores, and rankings. Output ONLY the bullet list."""
+Generate 4-5 bullet-point insights. Each starts with emoji. Be specific. Output ONLY bullets."""
 
     try:
-        insight_text = call_gemini(prompt)
-        write_insight(ind_id, today, insight_text)
-        print(f"  ✅ Insight generated ({len(insight_text)} chars)")
+        text = call_ai(prompt)
+        write_insight(ind_id, today, text)
+        print(f"✅ ({len(text)} chars)")
         success += 1
     except Exception as e:
-        print(f"  ❌ Failed: {e}")
+        print(f"❌ {e}")
 
-    time.sleep(5)
+    time.sleep(3)
 
-print(f"\n🎉 Done! {success}/{len(INDUSTRIES)} insights generated")
+print(f"\n🎉 {success}/{len(INDUSTRIES)} insights generated")
