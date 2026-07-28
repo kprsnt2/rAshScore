@@ -267,19 +267,23 @@ export async function getTimeline(industryId: string): Promise<{
 }
 
 /** Search brands across all industries */
-export async function searchBrands(query: string): Promise<BrandScore[]> {
+export async function searchBrands(query: string, date?: string): Promise<BrandScore[]> {
+  const dateClause = date
+    ? 'WHERE run_date = @date'
+    : 'WHERE run_date = (SELECT MAX(run_date) FROM `' + FQ + '.brand_scores_aggregated`)';
+
   const [rows] = await bq.query({
     query: `
       SELECT brand, score, recommendation, sentiment, prominence, accuracy,
              category, model, industry_id,
              ROW_NUMBER() OVER (PARTITION BY industry_id ORDER BY score DESC) as rank
       FROM \`${FQ}.brand_scores_aggregated\`
-      WHERE run_date = (SELECT MAX(run_date) FROM \`${FQ}.brand_scores_aggregated\`)
+      ${dateClause}
         AND LOWER(brand) LIKE CONCAT('%', LOWER(@q), '%')
       ORDER BY score DESC
       LIMIT 20
     `,
-    params: { q: query },
+    params: date ? { q: query, date } : { q: query },
   });
 
   return rows.map((r: Record<string, unknown>) => ({
