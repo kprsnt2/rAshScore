@@ -21,9 +21,9 @@
     "dependencies": {
         "@google-cloud/bigquery": "^7.9",
         "@tailwindcss/typography": "^0.5.20",
-        "ai": "latest",
-        "@ai-sdk/google": "latest",
-        "@ai-sdk/react": "latest",
+        "ai": "^3.4.33",
+        "@ai-sdk/google": "^0.0.55",
+        "@ai-sdk/react": "^0.0.70",
         "zod": "^3.23.8",
         "framer-motion": "^12.29.2",
         "next": "^16.1.5",

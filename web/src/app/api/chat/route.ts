@@ -45,10 +45,10 @@ export async function POST(req: Request) {
           parameters: z.object({
             brand: z.string().describe("The name of the brand (e.g., 'Flipkart')")
           }),
-          execute: async ({ brand }): Promise<any> => {
+          execute: async ({ brand }: { brand: string }) => {
             const date = await bq.getLatestRunDate();
             if (!date) return { error: "No data available." };
-            return await bq.getBrandScore(brand, date) || { error: `Brand '${brand}' not found.` };
+            return (await bq.getBrandScore(brand, date)) || { error: `Brand '${brand}' not found.` };
           }
         }),
         get_industry_rankings: tool({
@@ -57,7 +57,7 @@ export async function POST(req: Request) {
             industry: z.string().describe("The ID of the industry (e.g., 'technology', 'ecommerce')"),
             limit: z.number().optional().describe("Number of top brands to return (default: 5)")
           }),
-          execute: async ({ industry, limit }): Promise<any> => {
+          execute: async ({ industry, limit }: { industry: string; limit?: number }) => {
             const date = await bq.getLatestRunDate();
             if (!date) return { error: "No data available." };
             return await bq.getIndustryRankings(industry, date, limit || 5);
@@ -68,8 +68,8 @@ export async function POST(req: Request) {
           parameters: z.object({
             industry: z.string().describe("The ID of the industry (e.g., 'ecommerce')")
           }),
-          execute: async ({ industry }): Promise<any> => {
-            return await bq.getLatestInsight(industry) || { error: `No insights found for industry '${industry}'.` };
+          execute: async ({ industry }: { industry: string }) => {
+            return (await bq.getLatestInsight(industry)) || { error: `No insights found for industry '${industry}'.` };
           }
         }),
         search_brands: tool({
@@ -77,7 +77,7 @@ export async function POST(req: Request) {
           parameters: z.object({
             query: z.string().describe("The search term")
           }),
-          execute: async ({ query }): Promise<any> => {
+          execute: async ({ query }: { query: string }) => {
             const date = await bq.getLatestRunDate();
             if (!date) return { error: "No data available." };
             return await bq.searchBrands(query, date);
