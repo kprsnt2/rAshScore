@@ -26,7 +26,7 @@ export async function POST(req: Request) {
         process.env.GOOGLE_GENERATIVE_AI_API_KEY = apiKey;
     }
 
-    const result = streamText({
+    const result = await streamText({
       model: google('gemini-2.5-flash'),
       messages,
       system: `You are the rAsh Score AI Assistant, an expert in brand visibility and AI search rankings in India.
