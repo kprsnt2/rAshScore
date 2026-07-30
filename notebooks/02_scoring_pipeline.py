@@ -18,48 +18,45 @@ print("✅ Dependencies installed")
 import os
 
 GCP_PROJECT_ID = "rashscore"
+GCP_LOCATION = "us-central1"
 BQ_DATASET = "brand_intelligence"
 BQ_FULL = f"{GCP_PROJECT_ID}.{BQ_DATASET}"
-
-# ⚠️ SET YOUR API KEY — pick ONE method:
-
-# Method 1: Direct (for testing)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-
-# Method 2: Secret Manager (recommended for scheduled runs)
-# from google.cloud import secretmanager
-# sm = secretmanager.SecretManagerServiceClient()
-# GEMINI_API_KEY = sm.access_secret_version(
-#     name=f"projects/{GCP_PROJECT_ID}/secrets/gemini-api-key/versions/latest"
-# ).payload.data.decode("utf-8")
 
 PROVIDER = "gemini"
 PRIMARY_MODEL = "gemini-2.5-flash"
 BACKUP_MODEL = "gemini-2.5-flash-lite"
+TEMPERATURE = 0.3
+MAX_TOKENS = 8000
+TIMEOUT = 60
+RETRY_DELAYS = [10, 20, 30]
+DELAY_BETWEEN_INDUSTRIES = 3  # seconds
 
 SCORE_BOUNDS = {"recommendation": (0, 40), "sentiment": (0, 30), "prominence": (0, 20), "accuracy": (0, 10)}
 WEIGHTS = {"recommendation": 0.40, "sentiment": 0.30, "prominence": 0.20, "accuracy": 0.10}
-DELAY_BETWEEN_INDUSTRIES = 5  # seconds (SDK handles rate limits, so we can reduce this)
 
-print(f"✅ Config: {GCP_PROJECT_ID} / {PRIMARY_MODEL}")
-print(f"   API Key: {'SET' if GEMINI_API_KEY != 'YOUR_GEMINI_API_KEY_HERE' else '⚠️ NOT SET'}")
+print(f"✅ Config: {GCP_PROJECT_ID} / {PRIMARY_MODEL} (Vertex AI in {GCP_LOCATION})")
 
 # %% [markdown]
-# ## Cell 2: Initialize Gemini Client (google-genai SDK)
+# ## Cell 2: Initialize Gemini Client via Vertex AI
 
 # %%
 from google import genai
 from google.genai import types
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Initialize with Vertex AI (uses automatic GCP credentials in BigQuery Notebooks)
+genai_client = genai.Client(
+    vertexai=True,
+    project=GCP_PROJECT_ID,
+    location=GCP_LOCATION
+)
 
 # Quick test
-test = client.models.generate_content(
+test = genai_client.models.generate_content(
     model=PRIMARY_MODEL,
     contents="Say 'rAsh Score ready' in exactly 3 words.",
     config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=20),
 )
-print(f"✅ Gemini connected: {test.text.strip()}")
+print(f"✅ Vertex AI connected: {test.text.strip()}")
 
 # %% [markdown]
 # ## Cell 3: Industry & Brand Data
@@ -205,7 +202,7 @@ print("✅ Scoring logic loaded")
 def call_gemini(prompt, model=PRIMARY_MODEL):
     """Call Gemini using google-genai SDK. Handles retries automatically."""
     try:
-        response = client.models.generate_content(
+        response = genai_client.models.generate_content(
             model=model,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -375,3 +372,32 @@ df = bq_client.query(f"""
 
 print(f"📊 Top 20 brands scored today:")
 df
+
+# %% [markdown]
+# ## Cell 10: Refresh Daily Dashboard Snapshot Table (`brand_scores_aggregated`)
+
+# %%
+refresh_query = f"""
+CREATE OR REPLACE TABLE `{BQ_FULL}.brand_scores_aggregated` AS
+SELECT
+    run_date,
+    industry_id,
+    brand,
+    ANY_VALUE(category) AS category,
+    'all' AS model,
+    CAST(ROUND(AVG(score)) AS INT64) AS score,
+    CAST(ROUND(AVG(recommendation)) AS INT64) AS recommendation,
+    CAST(ROUND(AVG(sentiment)) AS INT64) AS sentiment,
+    CAST(ROUND(AVG(prominence)) AS INT64) AS prominence,
+    CAST(ROUND(AVG(accuracy)) AS INT64) AS accuracy,
+    COUNT(DISTINCT model) AS model_count,
+    CURRENT_TIMESTAMP() AS created_at
+FROM `{BQ_FULL}.brand_scores`
+WHERE run_date = (SELECT MAX(run_date) FROM `{BQ_FULL}.brand_scores` WHERE score > 0)
+  AND score > 0 AND error IS NULL
+GROUP BY run_date, industry_id, brand;
+"""
+
+bq_client.query(refresh_query).result()
+print("✅ Table `brand_scores_aggregated` created/refreshed with latest daily scores!")
+

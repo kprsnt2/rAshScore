@@ -1,7 +1,6 @@
 /**
  * rAsh Score v2.0 — BigQuery Client
- * Replaces the old db.ts (sql.js/better-sqlite3).
- * All dashboard data now comes from BigQuery.
+ * Queries `brand_scores_aggregated` (latest daily snapshot) with fallback to `brand_scores`.
  */
 
 import { BigQuery } from '@google-cloud/bigquery';
@@ -80,6 +79,8 @@ export async function getLatestRunDate(): Promise<string | null> {
     const [rows] = await bq.query({
       query: `
         SELECT MAX(latest) as latest FROM (
+          SELECT MAX(run_date) as latest FROM \`${FQ}.brand_scores_aggregated\`
+          UNION ALL
           SELECT MAX(run_date) as latest FROM \`${FQ}.pipeline_runs\` WHERE status IN ('success','partial')
           UNION ALL
           SELECT MAX(run_date) as latest FROM \`${FQ}.brand_scores\` WHERE score > 0
@@ -105,6 +106,8 @@ export async function getAvailableDates(): Promise<string[]> {
     const [rows] = await bq.query({
       query: `
         SELECT DISTINCT run_date FROM (
+          SELECT run_date FROM \`${FQ}.brand_scores_aggregated\`
+          UNION DISTINCT
           SELECT run_date FROM \`${FQ}.pipeline_runs\` WHERE status IN ('success','partial')
           UNION DISTINCT
           SELECT run_date FROM \`${FQ}.brand_scores\` WHERE score > 0
@@ -148,61 +151,70 @@ export async function getBrandResults(
   const c = cached<BrandScore[]>(ck);
   if (c) return c;
 
-  let query: string;
+  let rows: Record<string, unknown>[] = [];
   const params: Record<string, string> = { date, industryId };
 
   if (model === 'all') {
-    // Attempt aggregated view first, or fall back to raw table aggregation
-    query = `
-      SELECT brand, score, recommendation, sentiment, prominence, accuracy,
-             category, 'all' as model,
-             ROW_NUMBER() OVER (ORDER BY score DESC) as rank
-      FROM \`${FQ}.brand_scores_aggregated\`
-      WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId
-      ORDER BY score DESC
-    `;
-  } else {
-    query = `
-      SELECT brand, score, recommendation, sentiment, prominence, accuracy,
-             category, model,
-             ROW_NUMBER() OVER (ORDER BY score DESC) as rank
-      FROM \`${FQ}.brand_scores\`
-      WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId AND model = @model AND score > 0
-      ORDER BY score DESC
-    `;
-    params.model = model;
-  }
-
-  let rows: Record<string, unknown>[] = [];
-  try {
-    const [qRows] = await bq.query({ query, params });
-    rows = qRows as Record<string, unknown>[];
-  } catch (err) {
-    console.warn(`Query failed for model ${model}, trying fallback:`, err);
-  }
-
-  // Fallback for model === 'all' if aggregated view returns 0 rows
-  if (model === 'all' && rows.length === 0) {
+    // 1. Try brand_scores_aggregated
     try {
-      const fallbackQuery = `
-        SELECT brand,
-               CAST(ROUND(AVG(score)) AS INT64) as score,
-               CAST(ROUND(AVG(recommendation)) AS INT64) as recommendation,
-               CAST(ROUND(AVG(sentiment)) AS INT64) as sentiment,
-               CAST(ROUND(AVG(prominence)) AS INT64) as prominence,
-               CAST(ROUND(AVG(accuracy)) AS INT64) as accuracy,
-               ANY_VALUE(category) as category,
-               'all' as model,
-               ROW_NUMBER() OVER (ORDER BY AVG(score) DESC) as rank
-        FROM \`${FQ}.brand_scores\`
-        WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId AND score > 0 AND error IS NULL
-        GROUP BY brand
-        ORDER BY score DESC
-      `;
-      const [fbRows] = await bq.query({ query: fallbackQuery, params: { date, industryId } });
-      rows = fbRows as Record<string, unknown>[];
-    } catch (e) {
-      console.error('Fallback query error:', e);
+      const [qRows] = await bq.query({
+        query: `
+          SELECT brand, score, recommendation, sentiment, prominence, accuracy,
+                 category, 'all' as model,
+                 ROW_NUMBER() OVER (ORDER BY score DESC) as rank
+          FROM \`${FQ}.brand_scores_aggregated\`
+          WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId
+          ORDER BY score DESC
+        `,
+        params,
+      });
+      rows = qRows as Record<string, unknown>[];
+    } catch {
+      // ignore, fall back below
+    }
+
+    // 2. Fallback to raw brand_scores table if aggregated table is empty
+    if (rows.length === 0) {
+      try {
+        const [fbRows] = await bq.query({
+          query: `
+            SELECT brand,
+                   CAST(ROUND(AVG(score)) AS INT64) as score,
+                   CAST(ROUND(AVG(recommendation)) AS INT64) as recommendation,
+                   CAST(ROUND(AVG(sentiment)) AS INT64) as sentiment,
+                   CAST(ROUND(AVG(prominence)) AS INT64) as prominence,
+                   CAST(ROUND(AVG(accuracy)) AS INT64) as accuracy,
+                   ANY_VALUE(category) as category,
+                   'all' as model,
+                   ROW_NUMBER() OVER (ORDER BY AVG(score) DESC) as rank
+            FROM \`${FQ}.brand_scores\`
+            WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId AND score > 0 AND error IS NULL
+            GROUP BY brand
+            ORDER BY score DESC
+          `,
+          params,
+        });
+        rows = fbRows as Record<string, unknown>[];
+      } catch (err) {
+        console.error('Fallback query error:', err);
+      }
+    }
+  } else {
+    try {
+      const [qRows] = await bq.query({
+        query: `
+          SELECT brand, score, recommendation, sentiment, prominence, accuracy,
+                 category, model,
+                 ROW_NUMBER() OVER (ORDER BY score DESC) as rank
+          FROM \`${FQ}.brand_scores\`
+          WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId AND model = @model AND score > 0
+          ORDER BY score DESC
+        `,
+        params: { date, industryId, model },
+      });
+      rows = qRows as Record<string, unknown>[];
+    } catch (err) {
+      console.error('Model query error:', err);
     }
   }
 
@@ -239,21 +251,21 @@ async function getPreviousDayScores(
   industryId: string,
   model: string,
 ): Promise<{ brand: string; score: number; rank: number }[]> {
-  const table = model === 'all' ? 'brand_scores_aggregated' : 'brand_scores';
   const modelClause = model === 'all' ? '' : 'AND model = @model';
 
   const query = `
-    SELECT brand, score,
-           ROW_NUMBER() OVER (ORDER BY score DESC) as rank
-    FROM \`${FQ}.${table}\`
+    SELECT brand, CAST(ROUND(AVG(score)) AS INT64) as score,
+           ROW_NUMBER() OVER (ORDER BY AVG(score) DESC) as rank
+    FROM \`${FQ}.brand_scores\`
     WHERE industry_id = @industryId
       AND run_date = (
-        SELECT MAX(run_date) FROM \`${FQ}.${table}\`
-        WHERE industry_id = @industryId AND run_date < CAST(@currentDate AS DATE)
+        SELECT MAX(run_date) FROM \`${FQ}.brand_scores\`
+        WHERE industry_id = @industryId AND run_date < CAST(@currentDate AS DATE) AND score > 0
         ${modelClause}
       )
       ${modelClause}
-      AND score > 0
+      AND score > 0 AND error IS NULL
+    GROUP BY brand
     ORDER BY score DESC
   `;
 
@@ -285,10 +297,11 @@ export async function getTimeline(industryId: string): Promise<{
   try {
     const [rows] = await bq.query({
       query: `
-        SELECT run_date, brand, score,
-               ROW_NUMBER() OVER (PARTITION BY run_date ORDER BY score DESC) as rank
-        FROM \`${FQ}.brand_scores_aggregated\`
-        WHERE industry_id = @industryId
+        SELECT run_date, brand, CAST(ROUND(AVG(score)) AS INT64) as score,
+               ROW_NUMBER() OVER (PARTITION BY run_date ORDER BY AVG(score) DESC) as rank
+        FROM \`${FQ}.brand_scores\`
+        WHERE industry_id = @industryId AND score > 0 AND error IS NULL
+        GROUP BY run_date, brand
         ORDER BY run_date ASC, score DESC
       `,
       params: { industryId },
@@ -342,17 +355,26 @@ export async function getTimeline(industryId: string): Promise<{
 export async function searchBrands(query: string, date?: string): Promise<BrandScore[]> {
   const dateClause = date
     ? 'WHERE run_date = CAST(@date AS DATE)'
-    : 'WHERE run_date = (SELECT MAX(run_date) FROM `' + FQ + '.brand_scores_aggregated`)';
+    : 'WHERE run_date = (SELECT MAX(run_date) FROM `' + FQ + '.brand_scores`)';
 
   try {
     const [rows] = await bq.query({
       query: `
-        SELECT brand, score, recommendation, sentiment, prominence, accuracy,
-               category, model, industry_id,
-               ROW_NUMBER() OVER (PARTITION BY industry_id ORDER BY score DESC) as rank
-        FROM \`${FQ}.brand_scores_aggregated\`
+        SELECT brand,
+               CAST(ROUND(AVG(score)) AS INT64) as score,
+               CAST(ROUND(AVG(recommendation)) AS INT64) as recommendation,
+               CAST(ROUND(AVG(sentiment)) AS INT64) as sentiment,
+               CAST(ROUND(AVG(prominence)) AS INT64) as prominence,
+               CAST(ROUND(AVG(accuracy)) AS INT64) as accuracy,
+               ANY_VALUE(category) as category,
+               'all' as model,
+               ANY_VALUE(industry_id) as industry_id,
+               ROW_NUMBER() OVER (ORDER BY AVG(score) DESC) as rank
+        FROM \`${FQ}.brand_scores\`
         ${dateClause}
           AND LOWER(brand) LIKE CONCAT('%', LOWER(@q), '%')
+          AND score > 0 AND error IS NULL
+        GROUP BY brand
         ORDER BY score DESC
         LIMIT 20
       `,
@@ -454,12 +476,21 @@ export async function getBrandScore(brand: string, date: string): Promise<BrandS
   try {
     const [rows] = await bq.query({
       query: `
-        SELECT brand, score, recommendation, sentiment, prominence, accuracy,
-               category, model, industry_id,
-               ROW_NUMBER() OVER (PARTITION BY industry_id ORDER BY score DESC) as rank
-        FROM \`${FQ}.brand_scores_aggregated\`
+        SELECT brand,
+               CAST(ROUND(AVG(score)) AS INT64) as score,
+               CAST(ROUND(AVG(recommendation)) AS INT64) as recommendation,
+               CAST(ROUND(AVG(sentiment)) AS INT64) as sentiment,
+               CAST(ROUND(AVG(prominence)) AS INT64) as prominence,
+               CAST(ROUND(AVG(accuracy)) AS INT64) as accuracy,
+               ANY_VALUE(category) as category,
+               'all' as model,
+               ANY_VALUE(industry_id) as industry_id,
+               1 as rank
+        FROM \`${FQ}.brand_scores\`
         WHERE run_date = CAST(@date AS DATE)
           AND LOWER(brand) = LOWER(@brand)
+          AND score > 0 AND error IS NULL
+        GROUP BY brand
         LIMIT 1
       `,
       params: { date, brand },
@@ -488,11 +519,18 @@ export async function getIndustryRankings(industryId: string, date: string, limi
   try {
     const [rows] = await bq.query({
       query: `
-        SELECT brand, score, recommendation, sentiment, prominence, accuracy,
-               category, model, industry_id,
-               ROW_NUMBER() OVER (ORDER BY score DESC) as rank
-        FROM \`${FQ}.brand_scores_aggregated\`
-        WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId
+        SELECT brand,
+               CAST(ROUND(AVG(score)) AS INT64) as score,
+               CAST(ROUND(AVG(recommendation)) AS INT64) as recommendation,
+               CAST(ROUND(AVG(sentiment)) AS INT64) as sentiment,
+               CAST(ROUND(AVG(prominence)) AS INT64) as prominence,
+               CAST(ROUND(AVG(accuracy)) AS INT64) as accuracy,
+               ANY_VALUE(category) as category,
+               'all' as model,
+               ROW_NUMBER() OVER (ORDER BY AVG(score) DESC) as rank
+        FROM \`${FQ}.brand_scores\`
+        WHERE run_date = CAST(@date AS DATE) AND industry_id = @industryId AND score > 0 AND error IS NULL
+        GROUP BY brand
         ORDER BY score DESC
         LIMIT @limit
       `,

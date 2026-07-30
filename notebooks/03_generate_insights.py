@@ -15,11 +15,11 @@ from google.genai import types
 from google.cloud import bigquery
 
 GCP_PROJECT_ID = "rashscore"
+GCP_LOCATION = "us-central1"
 BQ_FULL = f"{GCP_PROJECT_ID}.brand_intelligence"
 MODEL = "gemini-2.5-flash"
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-ai = genai.Client(api_key=GEMINI_API_KEY)
+ai = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
 bq = bigquery.Client(project=GCP_PROJECT_ID)
 
 INDUSTRIES = [
