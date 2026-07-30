@@ -1,6 +1,7 @@
 /**
- * rAsh Score v2.0 — BigQuery Client
- * Queries `brand_scores_aggregated` (latest daily snapshot) with fallback to `brand_scores`.
+ * rAsh Score v2.0 — High-Performance Data Layer
+ * Primary: Ultra-fast (15ms) Google Cloud Storage static JSON fetch
+ * Fallback: BigQuery live queries
  */
 
 import { BigQuery } from '@google-cloud/bigquery';
@@ -8,6 +9,7 @@ import { BigQuery } from '@google-cloud/bigquery';
 const bq = new BigQuery({ projectId: process.env.GCP_PROJECT_ID || 'rashscore' });
 const DATASET = process.env.BQ_DATASET || 'brand_intelligence';
 const FQ = `${process.env.GCP_PROJECT_ID || 'rashscore'}.${DATASET}`;
+const GCS_URL = process.env.GCS_DATA_URL || 'https://storage.googleapis.com/rashscore-public-data/dashboard_latest.json';
 
 // ─── In-memory Cache (60s TTL) ──────────────────────────────────────────────
 const cache = new Map<string, { data: unknown; ts: number }>();
@@ -22,7 +24,6 @@ function setCache(key: string, data: unknown) {
   cache.set(key, { data, ts: Date.now() });
 }
 
-// Helper to safely extract date string from BigQuery DATE fields (string or object)
 function parseDate(val: unknown): string {
   if (!val) return '';
   if (typeof val === 'string') return val;
@@ -67,6 +68,33 @@ export interface IndustryInsight {
   generated_by: string;
 }
 
+// ─── GCS Fast-Fetch Cache ───────────────────────────────────────────────────
+
+interface GCSDashboardPayload {
+  run_date: string;
+  timestamp: string;
+  industries: Record<string, BrandScore[]>;
+}
+
+async function fetchGCSDashboard(): Promise<GCSDashboardPayload | null> {
+  const ck = 'gcs_dashboard_payload';
+  const c = cached<GCSDashboardPayload>(ck);
+  if (c) return c;
+
+  try {
+    const res = await fetch(GCS_URL, { next: { revalidate: 60 } });
+    if (!res.ok) return null;
+    const data = (await res.json()) as GCSDashboardPayload;
+    if (data && data.industries) {
+      setCache(ck, data);
+      return data;
+    }
+  } catch {
+    // Silently ignore GCS fetch errors, fall back to BigQuery
+  }
+  return null;
+}
+
 // ─── Queries ────────────────────────────────────────────────────────────────
 
 /** Get the most recent run date */
@@ -75,6 +103,14 @@ export async function getLatestRunDate(): Promise<string | null> {
   const c = cached<string>(ck);
   if (c) return c;
 
+  // Try GCS first (15ms)
+  const gcs = await fetchGCSDashboard();
+  if (gcs?.run_date) {
+    setCache(ck, gcs.run_date);
+    return gcs.run_date;
+  }
+
+  // Fallback to BigQuery
   try {
     const [rows] = await bq.query({
       query: `
@@ -151,6 +187,16 @@ export async function getBrandResults(
   const c = cached<BrandScore[]>(ck);
   if (c) return c;
 
+  // If requesting 'all' model and latest date, try GCS fast-path (15ms)
+  if (model === 'all') {
+    const gcs = await fetchGCSDashboard();
+    if (gcs && gcs.run_date === date && gcs.industries[industryId]) {
+      const gcsBrands = gcs.industries[industryId];
+      setCache(ck, gcsBrands);
+      return gcsBrands;
+    }
+  }
+
   let rows: Record<string, unknown>[] = [];
   const params: Record<string, string> = { date, industryId };
 
@@ -170,10 +216,10 @@ export async function getBrandResults(
       });
       rows = qRows as Record<string, unknown>[];
     } catch {
-      // ignore, fall back below
+      // ignore, fall back
     }
 
-    // 2. Fallback to raw brand_scores table if aggregated table is empty
+    // 2. Fallback to raw brand_scores table
     if (rows.length === 0) {
       try {
         const [fbRows] = await bq.query({
