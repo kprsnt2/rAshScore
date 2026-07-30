@@ -3,10 +3,10 @@
  * Returns ranked brands from BigQuery (replaces SQLite queries).
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { getBrandResults, getAvailableModels, getLatestRunDate, getAvailableDates } from '@/lib/bq';
+import { getBrandResults, getAvailableModels, getLatestRunDate } from '@/lib/bq';
 import { INDUSTRIES } from '@/lib/industry-data';
 
-export const revalidate = 3600;
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   try {
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
     // Determine run date
     const runDate = dateParam || await getLatestRunDate();
     if (!runDate) {
-      return NextResponse.json({ error: 'No pipeline data available' }, { status: 404 });
+      return NextResponse.json({ error: 'No pipeline data available in BigQuery' }, { status: 404 });
     }
 
     // Get brand results from BigQuery
@@ -33,7 +33,12 @@ export async function GET(request: NextRequest) {
     const availableModels = await getAvailableModels(runDate, industryId);
 
     if (brands.length === 0) {
-      return NextResponse.json({ error: 'No data available for this industry' }, { status: 404 });
+      return NextResponse.json({
+        error: 'No data available for this industry',
+        industryId,
+        runDate,
+        model
+      }, { status: 404 });
     }
 
     // Compute industry average
@@ -43,7 +48,7 @@ export async function GET(request: NextRequest) {
     const avgProm = Math.round(brands.reduce((s, b) => s + b.prominence, 0) / brands.length);
     const avgAcc = Math.round(brands.reduce((s, b) => s + b.accuracy, 0) / brands.length);
 
-    // Format response (matches old API shape for dashboard compatibility)
+    // Format response
     const rankedBrands = brands.map((b) => ({
       brand: b.brand,
       score: b.score,
@@ -79,13 +84,13 @@ export async function GET(request: NextRequest) {
       timestamp: new Date().toISOString(),
     }, {
       headers: {
-        'Cache-Control': 'public, max-age=3600',
+        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error in /api/brands:', error);
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: 'Internal server error', details: error?.message || String(error) },
       { status: 500 }
     );
   }

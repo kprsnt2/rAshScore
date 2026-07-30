@@ -461,13 +461,13 @@ export async function getPipelineRuns(limit: number = 10): Promise<PipelineRun[]
 }
 
 /** Health check — verify BigQuery connectivity */
-export async function healthCheck(): Promise<{ ok: boolean; latency: number }> {
+export async function healthCheck(): Promise<{ ok: boolean; latency: number; error?: string }> {
   const start = Date.now();
   try {
     await bq.query({ query: 'SELECT 1' });
     return { ok: true, latency: Date.now() - start };
-  } catch {
-    return { ok: false, latency: Date.now() - start };
+  } catch (err: any) {
+    return { ok: false, latency: Date.now() - start, error: err?.message || String(err) };
   }
 }
 
