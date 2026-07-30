@@ -187,13 +187,15 @@ export async function getBrandResults(
   const c = cached<BrandScore[]>(ck);
   if (c) return c;
 
-  // If requesting 'all' model and latest date, try GCS fast-path (15ms)
+  // If requesting 'all' model, try GCS fast-path (15ms)
   if (model === 'all') {
     const gcs = await fetchGCSDashboard();
-    if (gcs && gcs.run_date === date && gcs.industries[industryId]) {
-      const gcsBrands = gcs.industries[industryId];
-      setCache(ck, gcsBrands);
-      return gcsBrands;
+    if (gcs && gcs.industries) {
+      const gcsBrands = gcs.industries[industryId] || gcs.industries[industryId.replace(/-/g, '_')];
+      if (gcsBrands && gcsBrands.length > 0) {
+        setCache(ck, gcsBrands);
+        return gcsBrands;
+      }
     }
   }
 
