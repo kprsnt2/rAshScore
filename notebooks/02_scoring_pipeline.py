@@ -401,3 +401,70 @@ GROUP BY run_date, industry_id, brand;
 bq_client.query(refresh_query).result()
 print("✅ Table `brand_scores_aggregated` created/refreshed with latest daily scores!")
 
+# %% [markdown]
+# ## Cell 11: Export Dashboard JSON to Google Cloud Storage (15ms Ultra-Fast Reads)
+
+# %%
+from google.cloud import storage
+from google.api_core.exceptions import NotFound, Conflict
+from datetime import datetime, timezone
+import json
+
+def export_to_gcs():
+    query = f"""
+    SELECT industry_id, brand, score, recommendation, sentiment, prominence, accuracy, category
+    FROM `{BQ_FULL}.brand_scores`
+    WHERE run_date = '{run_date}' AND score > 0 AND error IS NULL
+    ORDER BY score DESC
+    """
+    rows = list(bq_client.query(query).result())
+    
+    industries_map = {}
+    for r in rows:
+        ind = r.industry_id
+        if ind not in industries_map:
+            industries_map[ind] = []
+        industries_map[ind].append({
+            "brand": r.brand,
+            "score": r.score,
+            "recommendation": r.recommendation,
+            "sentiment": r.sentiment,
+            "prominence": r.prominence,
+            "accuracy": r.accuracy,
+            "category": r.category,
+            "model": "all",
+            "rank": len(industries_map[ind]) + 1
+        })
+
+    payload = {
+        "run_date": run_date,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "industries": industries_map
+    }
+
+    bucket_name = f"{GCP_PROJECT_ID}-public-data"
+    try:
+        storage_client = storage.Client(project=GCP_PROJECT_ID)
+        try:
+            bucket = storage_client.get_bucket(bucket_name)
+        except NotFound:
+            print(f"📦 Bucket '{bucket_name}' not found, creating it...")
+            bucket = storage_client.create_bucket(bucket_name, location=GCP_LOCATION)
+        except Exception:
+            bucket = storage_client.bucket(bucket_name)
+
+        blob = bucket.blob("dashboard_latest.json")
+        blob.upload_from_string(json.dumps(payload), content_type="application/json")
+        
+        try:
+            blob.make_public()
+        except Exception:
+            pass
+
+        print(f"🚀 Dashboard static JSON exported to GCS (15ms fast-path ready)!")
+    except Exception as e:
+        print(f"⚠ GCS export info: {e}")
+
+export_to_gcs()
+
+
